@@ -1,0 +1,1390 @@
+---
+title: "Capuchin Reciprocity in an Active Cooperative Paradigm"
+output: word_document
+date: "2026-05-11"
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Install your Packages}
+#install.packages("rstudioapi")
+#install.packages("openxlsx")
+#install.packages("dplyr")
+#install.packages("tidyr")
+#install.packages("tidyverse")
+#install.packages("lme4")
+#install.packages("car")
+#install.packages("emmeans")
+#install.packages("sjPlot")
+#install.packages("Rmisc")
+#install.packages("rstatix")
+#install.packages("glmmTMB")
+#install.packages("DHARMa")
+#install.packages("ggbeeswarm")
+#install.packages("gridExtra")
+```
+
+```{r}
+#detach("package:Rmisc")
+#detach("package:plyr")
+```
+
+
+```{r}
+library(rstudioapi)
+library(openxlsx)
+library(readxl)
+library(lme4)
+library(car)
+library(emmeans)
+library(glmmTMB)
+library(DHARMa)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(sjPlot)
+#library(Rmisc)
+#library(rstatix)
+#library(ggbeeswarm)
+#library(gridExtra)
+```
+
+```{r}
+current_path <- getActiveDocumentContext()$path
+#setwd(dirname(current_path))
+print(getwd())
+```
+
+```{r Runs the same dharma check on any model}
+dharma_check <- function(model, data, predictors = c(), label = "", nsim = 1000, seed = 123) {
+  for (mode in c("unconditional", "conditional")) {
+    cat("\n====", label, "-", mode, "simulations ====\n")
+    sr <- simulateResiduals(model, n = nsim, simulateREs = mode, seed = seed)
+    plot(sr, title = paste(label, "-", mode))
+    print(testUniformity(sr, plot = FALSE))
+    print(testDispersion(sr, plot = FALSE))
+    print(testQuantiles(sr, plot = FALSE))
+    for (v in predictors) {
+      cat("\n-- residuals vs", v, "--\n")
+      plotResiduals(sr, form = data[[v]], main = paste(label, mode, "vs", v))
+    }
+    sr_sess <- recalculateResiduals(sr, group = data$subj_session)
+    cat("\n-- residuals aggregated by subject-session --\n")
+    print(testDispersion(sr_sess, plot = FALSE))
+  }
+}
+```
+
+
+```{r Read the Data File}
+recip.data <- read.csv("Study_3_Final_Data.csv", header = TRUE)
+csi.data <- read.csv("CSI_Values.csv", header = TRUE)
+
+recip.data$dyad              <- as.factor(recip.data$dyad)
+recip.data$subject_a         <- as.factor(recip.data$subject_a)
+recip.data$subject_b         <- as.factor(recip.data$subject_b)
+recip.data$condition         <- as.factor(recip.data$condition)
+recip.data$session_in_condition <- as.numeric(recip.data$session_in_condition)
+recip.data$total_session_number <- as.numeric(recip.data$total_session_number)
+recip.data$trial_within_session <- as.numeric(recip.data$trial_within_session)
+recip.data$trial_type        <- as.factor(recip.data$trial_type)
+recip.data$pull              <- as.numeric(recip.data$pull)
+recip.data$subject_a_blocker <- as.numeric(recip.data$subject_a_blocker)
+recip.data$subject_b_blocker <- as.numeric(recip.data$subject_b_blocker)
+recip.data$subject_a_reach_after_blocker <- as.numeric(recip.data$subject_a_reach_after_blocker)
+recip.data$subject_b_reach_after_blocker <- as.numeric(recip.data$subject_b_reach_after_blocker)
+recip.data$subject_a_apparatus <- as.numeric(recip.data$subject_a_apparatus)
+recip.data$subject_b_apparatus <- as.numeric(recip.data$subject_b_apparatus)
+recip.data$subject_a_scratch <- as.numeric(recip.data$subject_a_scratch)
+recip.data$subject_b_scratch <- as.numeric(recip.data$subject_b_scratch)
+
+recip.data$condition <- relevel(recip.data$condition, ref = "Unilateral")
+levels(recip.data$condition)
+levels(recip.data$trial_type)
+levels(recip.data$dyad)
+```
+
+```{r Descriptives}
+# Number of trials per condition and trial type
+table(recip.data$condition, recip.data$trial_type)
+
+# Number of sessions per dyad
+recip.data %>%
+  group_by(dyad, condition) %>%
+  summarise(n_sessions = max(session_in_condition, na.rm = TRUE), .groups = "drop")
+
+# Overall pull success rate
+nrow(subset(recip.data, pull == 1)) / nrow(recip.data)
+
+# Blocker removal rates by trial type
+recip.data %>%
+  group_by(trial_type) %>%
+  summarise(
+    a_blocker_rate = mean(subject_a_blocker > 0, na.rm = TRUE),
+    b_blocker_rate = mean(subject_b_blocker > 0, na.rm = TRUE),
+    n = n()
+  )
+
+# In early/early trials, the blocker was removed in 24.9% (Subject A) and 37.2% (Subject B) for an average of 31.05%
+# In end/end trials, the blocker was removed in 96.6% (Subject A) and 96.0% (Subject B) for an average of 96.03%
+# In early/end trials when Subject A benefited early, Subject A moved their blocker 42.1% of trials
+# In early/end trials when Subject B benefited early, Subject B moved their blocker 46.4% of trials
+```
+
+```{r}
+long.data <- read.csv("long_data_final.csv", header = TRUE)
+
+long.data$subject  <- as.factor(long.data$subject)
+long.data$partner  <- as.factor(long.data$partner)
+long.data$dyad     <- as.factor(long.data$dyad)
+long.data$role     <- as.factor(long.data$role)
+long.data$condition <- as.factor(long.data$condition)
+long.data$trial_type <- as.factor(long.data$trial_type)
+long.data$CSI <- as.numeric(long.data$CSI)
+long.data$subject_sex <- as.factor(long.data$subject_sex)
+
+# Scale trial number and session number for modeling
+long.data$total_session_number_z <- scale(long.data$total_session_number_by_subject, center = TRUE, scale = TRUE)
+long.data$trial_within_session_z <- scale(long.data$trial_within_session, center = TRUE, scale = TRUE)
+
+# NEW (v6): Experience enters the models on a log scale. Blocker removal in the Early trials
+# dropped steeply over the first sessions and then levelled off, which a straight line on the
+# logit scale could not capture (DHARMa: residuals vs. session and vs. fitted values failed).
+# log_total_z = standardized log(total session number for that subject).
+# One SD of log session = 0.781, i.e., a 2.18-fold change in session number.
+long.data$log_total_z <- as.numeric(scale(log(long.data$total_session_number_by_subject)))
+
+# NEW (v5): Session-level random intercept. Trials within the same session for the same subject
+# were more similar to each other than the model expected (DHARMa dispersion test on residuals
+# aggregated by subject-session failed). One level per subject per session (80 levels).
+long.data$subj_session <- interaction(long.data$subject, long.data$total_session_number_by_subject,
+                                      drop = TRUE, sep = "_S")
+
+long.data$condition <- relevel(long.data$condition, ref = "Unilateral")
+levels(long.data$condition)
+levels(long.data$trial_type)
+levels(long.data$dyad)
+```
+
+```{r Identify Early Trials for Reciprocity Model}
+# Keep only rows where the focal subject received food early:
+#   role a in early_a and early_early trials
+#   role b in early_b and early_early trials
+early.data <- long.data %>%
+  filter(!is.na(focal_trial_type), focal_trial_type != "end_end")
+```
+
+```{r Compute Reciprocity Variable: Partner's Prior Helping Rate}
+
+# Binarize blocker removal (any removal = 1, no removal = 0)
+recip.data$a_blocker_binary <- ifelse(recip.data$subject_a_blocker > 0, 1, 0)
+recip.data$b_blocker_binary <- ifelse(recip.data$subject_b_blocker > 0, 1, 0)
+
+# Partner's prior helping rate: proportion of earlier Early/End trials (within dyad x condition)
+# in which the individual was rewarded early and moved its blocker for the partner
+recip.data <- recip.data %>%
+  arrange(dyad, condition, total_session_number, trial_within_session) %>%
+  group_by(dyad, condition) %>%
+  mutate(
+    a_opp = as.numeric(trial_type == "early_a"),   # A rewarded early, B needs help
+    b_opp = as.numeric(trial_type == "early_b"),   # B rewarded early, A needs help
+    a_prior_help_rate = lag(cumsum(a_blocker_binary * a_opp)) / lag(cumsum(a_opp)),
+    b_prior_help_rate = lag(cumsum(b_blocker_binary * b_opp)) / lag(cumsum(b_opp))
+  ) %>%
+  ungroup() %>%
+  mutate(across(c(a_prior_help_rate, b_prior_help_rate), ~ ifelse(is.nan(.x), NA, .x))) %>%
+  select(-a_opp, -b_opp)
+
+# For Alternating sessions only, see if the preceding trial was helpful to the subject
+recip.data <- recip.data %>%
+  arrange(dyad, condition, total_session_number, trial_within_session) %>%
+  group_by(dyad, condition, total_session_number) %>%
+  mutate(
+    # Store subject B's blocker value only on early_b trials
+    last_early_b_b_blocker = ifelse(
+      condition == "Alternating" & trial_type == "early_b",
+      subject_b_blocker,
+      NA
+    ),
+
+    # Store subject A's blocker value only on early_a trials
+    last_early_a_a_blocker = ifelse(
+      condition == "Alternating" & trial_type == "early_a",
+      subject_a_blocker,
+      NA
+    )
+  ) %>%
+  fill(last_early_b_b_blocker, last_early_a_a_blocker, .direction = "down") %>%
+  mutate(
+    Alternating_recip_binary = case_when(
+      condition == "Alternating" & trial_type == "early_a" ~ last_early_b_b_blocker,
+      condition == "Alternating" & trial_type == "early_b" ~ last_early_a_a_blocker,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  select(-last_early_b_b_blocker, -last_early_a_a_blocker)
+
+# Merge prior helping rates back into long data for the early-blocker trials
+early.data <- early.data %>%
+  left_join(
+    recip.data %>%
+      select(observation, trial_within_session, a_prior_help_rate, b_prior_help_rate, Alternating_recip_binary),
+    by = c("observation", "trial_within_session")
+  ) %>%
+  mutate(
+    partner_prior_help = ifelse(role == "a", b_prior_help_rate, a_prior_help_rate)
+  )
+
+early.data$partner_prior_help_z <- scale(early.data$partner_prior_help, center = TRUE, scale = TRUE)
+```
+
+
+```{r Latency Data}
+# Only trials where focal subject received food early AND actually moved the blocker
+latency.data <- early.data %>%
+ filter(blocker_binary == 1, !is.na(blocker_latency))
+# Check distribution — Gamma requires strictly positive values
+summary(latency.data$blocker_latency)
+hist(latency.data$blocker_latency, breaks = 30,
+    main = "Distribution of Blocker Latency", xlab = "Latency (s)")
+# Mean and SD by focal_trial_type and condition
+latency.data %>%
+ group_by(focal_trial_type, condition) %>%
+ summarise(
+   mean_latency = mean(blocker_latency, na.rm = TRUE),
+   sd_latency   = sd(blocker_latency, na.rm = TRUE),
+   median_latency = median(blocker_latency, na.rm = TRUE),
+   n = n(),
+   .groups = "drop"
+ )
+
+
+```
+
+
+# MODEL 1 - Blocker Removal Across Trial Types --------------------------------
+
+```{r Model 1 Build - Blocker Removal Across Trial Types}
+# Set reference level to end_end (baseline - no early option available)
+long.data$trial_type <- relevel(long.data$trial_type, ref = "end_end")
+
+# Use focal_trial_type, which recodes trial type from the focal subject's perspective:
+#   solo_early = only I received food early (early_a for role a; early_b for role b)
+#   both_early = both subjects received food early (early_early)
+#   end_end    = neither subject received food early
+# NA rows are role a in early_b trials and role b in early_a trials — excluded.
+# Reference = solo_early so the key contrast is both_early vs. solo_early directly.
+
+# Model 1 data only cares about end/end, early/early, and the focal subject in the early/end trial (not the other one)
+model1.data <- long.data %>%
+  filter(!is.na(focal_trial_type))
+
+# Null model (v5: same random-effect structure as the full model)
+NULL_M1 <- glmer(blocker_binary ~ 1 + (1 | subject) + (1 | partner) + (1 | subj_session),
+                 family = binomial(link = "logit"),
+                 data = model1.data,
+                 control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+# v4 model, kept ONLY for comparison with the v5 model (failed DHARMa checks; do not report)
+M1_OLD <- glmer(blocker_binary ~ focal_trial_type*condition + total_session_number_z*focal_trial_type + trial_within_session_z + partner_apparatus + focal_trial_type*CSI + focal_trial_type*partner_apparatus +
+              condition*CSI +
+              (1 | subject) + (1 | partner),
+            family = binomial(link = "logit"),
+            data = model1.data,
+            control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+# Model 1: focal_trial_type and condition
+# Key contrast: both_early vs. solo_early — did subjects help as much when
+# their partner was also already rewarded versus when only they were?
+# apparatus included to control for the number of times the partner interacted with the apparatus
+# v5 CHANGES: (1) log_total_z replaces total_session_number_z (non-linear learning curve)
+#             (2) (1 | subj_session) added (trials clustered within sessions)
+
+M1 <- glmer(blocker_binary ~ focal_trial_type*condition + log_total_z*focal_trial_type + trial_within_session_z + partner_apparatus + focal_trial_type*CSI + focal_trial_type*partner_apparatus +
+              condition*CSI +
+              (1 | subject) + (1 | partner) + (1 | subj_session),
+            family = binomial(link = "logit"),
+            data = model1.data,
+            control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000),
+                                   calc.derivs = TRUE))
+
+V_M1 <- as.matrix(vcov(M1, use.hessian = TRUE))
+
+
+anova(NULL_M1, M1, test = "Chisq")
+
+# M1 with linear learning rate vs new M1 with log scale learning rate (lower AIC = better)
+AIC(M1_OLD, M1)
+```
+
+```{r Model 1 Summary and Interactions}
+summary(M1)
+
+Anova(M1, type = 3)
+
+#tab_model(M1,
+#          show.est = TRUE, show.ci = 0.95,
+#          show.p = TRUE, p.style = "numeric",
+#          show.se = TRUE, show.r2 = TRUE,
+#          show.zeroinf = FALSE,
+#          show.re.var = FALSE, show.icc = FALSE,
+#          title = "GLMM Predicting Blocker Removal Across Trial Types")
+
+# Marginal means for all focal_trial_type x condition cells
+EMM_M1 <- emmeans(M1, ~ focal_trial_type * condition, type = "response")
+EMM_M1
+# Critical comparison: both_early vs. solo_early within each condition
+pairs(EMM_M1, by = "condition", adjust = "holm", type = "response")
+confint(pairs(EMM_M1, by = "condition", adjust = "holm", type = "response"))
+
+EMM_M1_trial <- emmeans(M1, ~ focal_trial_type, type = "response")
+# Critical comparison: leaving out the interaction with condition
+pairs(EMM_M1_trial, adjust = "holm", type = "response")
+
+# Can also look at between Unilateral and Alternating Conditions
+pairs(EMM_M1, by = "focal_trial_type", adjust = "holm", type = "response")
+summary(pairs(EMM_M1, by = "focal_trial_type", adjust = "holm", type = "response"),
+        infer = TRUE)
+```
+
+
+```{r Model 1 CSI x Trial Type Interactions}
+
+CSI_slopes <- summary(emtrends(M1, ~ focal_trial_type, var = "CSI", vcov. = V_M1), infer = TRUE)
+data.frame(trial_type = CSI_slopes$focal_trial_type,
+           OR  = round(exp(CSI_slopes$CSI.trend), 2),
+           LCL = round(exp(CSI_slopes$asymp.LCL), 2),
+           UCL = round(exp(CSI_slopes$asymp.UCL), 2),
+           p   = round(CSI_slopes$p.value, 3))
+
+
+# CSI and Trial Type Interaction
+EMM_CSIxTT <- emtrends(M1, specs = ~ focal_trial_type, var = "CSI", type = "response")
+#CIs
+summary(EMM_CSIxTT, infer = TRUE)
+# Pairwise comparisons
+pairs(EMM_CSIxTT)
+summary(pairs(EMM_CSIxTT), infer = TRUE)
+
+# CSI Trends data
+CSItrends <- emtrends(M1, ~ focal_trial_type, var = "CSI")
+pairs(CSItrends, adjust = "holm")
+summary(pairs(CSItrends, adjust = "holm",  infer = TRUE))
+
+V_M1 <- as.matrix(vcov(M1, use.hessian = TRUE))
+
+CSI_slopes <- summary(emtrends(M1, ~ focal_trial_type, var = "CSI", vcov. = V_M1), infer = TRUE)
+# pass vcov. = V_M1 to the other emmeans()/emtrends() calls on M1 too,
+# and to Anova(M1, type = 3, vcov. = V_M1)
+CSI_OR <- data.frame(
+  trial_type = CSI_slopes$focal_trial_type,
+  OR  = round(exp(CSI_slopes$CSI.trend), 2),
+  LCL = round(exp(CSI_slopes$asymp.LCL), 2),
+  UCL = round(exp(CSI_slopes$asymp.UCL), 2),
+  p   = round(CSI_slopes$p.value, 3)
+)
+print(CSI_OR)
+#   trial_type    OR  LCL   UCL     p
+#   both_early  0.41 0.15  1.15 0.090   <- Early/Early
+#   end_end    10.81 1.97 59.14 0.006   <- End/End
+#   solo_early  0.46 0.16  1.32 0.147   <- Early/End
+
+# ---- Where the End/End failures come from ----
+end_end_fails <- model1.data %>%
+  filter(focal_trial_type == "end_end", blocker_binary == 0) %>%
+  count(dyad, CSI = round(CSI, 2), subject, name = "n_failures") %>%
+  arrange(CSI)
+end_end_fails
+
+sum(end_end_fails$n_failures)   # 24 End/End trials where the blocker was not moved
+
+end_end_fails %>%
+  group_by(dyad, CSI) %>%
+  summarise(n_failures = sum(n_failures), .groups = "drop") %>%
+  arrange(desc(n_failures))
+```
+
+
+```{r Model 1 Session Number x Trial Type Interaction}
+# Session Number and Trial Type Interaction
+# v5: slope is now per 1 SD of log(session). The OR per doubling of session number
+# (e.g., session 2 -> 4, 4 -> 8) is easier to report, so it is computed below as well.
+EMM_sessionxTT <- emtrends(M1, specs = ~ focal_trial_type, var = "log_total_z")
+#CIs
+sess_tr <- summary(EMM_sessionxTT, infer = TRUE)
+sess_tr
+sd_log_sess <- sd(log(long.data$total_session_number_by_subject))
+k_double <- log(2) / sd_log_sess
+data.frame(focal_trial_type = sess_tr$focal_trial_type,
+           OR_per_doubling  = exp(sess_tr$log_total_z.trend * k_double),
+           LCL = exp(sess_tr$asymp.LCL * k_double),
+           UCL = exp(sess_tr$asymp.UCL * k_double),
+           p   = sess_tr$p.value)
+
+```
+
+```{r Investigate the relationship effect}
+CSI_by_trial_condition <- emtrends(
+  M1,
+  specs = ~ focal_trial_type * condition,
+  var = "CSI"
+)
+
+summary(CSI_by_trial_condition, infer = TRUE)
+
+# Compare CSI slopes between conditions within each trial type
+pairs(
+  CSI_by_trial_condition,
+  by = "focal_trial_type",
+  adjust = "holm"
+)
+```
+
+```{r}
+model1.data.decomp <- model1.data %>%
+  group_by(subject) %>%
+  mutate(
+    mean_CSI_subject = mean(CSI, na.rm = TRUE),
+    CSI_within_subject = CSI - mean_CSI_subject
+  ) %>%
+  ungroup()
+
+M_CSI_decomp <- glmer(blocker_binary ~ focal_trial_type * condition + 
+                        log_total_z * focal_trial_type +
+                        trial_within_session_z +
+                        partner_apparatus +
+                        focal_trial_type * CSI_within_subject +
+                        focal_trial_type * mean_CSI_subject +
+                        condition * CSI_within_subject +
+                        condition * mean_CSI_subject +
+                        focal_trial_type * partner_apparatus +
+                        (1 | subject) + (1 | partner) + (1 | subj_session),
+  family = binomial(link = "logit"),
+  data = model1.data.decomp,
+  control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 200000)
+  )
+)
+
+Anova(M_CSI_decomp, type = 3)
+summary(M_CSI_decomp)
+```
+
+```{r Check Model 1 Assumptions}
+summary(M1)$varcor
+
+# v5: full DHARMa battery (both simulation types, predictors, session-level aggregation)
+dharma_check(M1, model1.data,
+             predictors = c("log_total_z", "trial_within_session_z", "CSI", "partner_apparatus", "focal_trial_type"),
+             label = "Model 1")
+
+# Collinearity check (additive version)
+M1_simple <- glmer(blocker_binary ~ focal_trial_type + condition + log_total_z + trial_within_session_z + partner_apparatus +
+                     CSI + subject_sex +
+                     (1 | subject) + (1 | partner) + (1 | subj_session),
+                   family = binomial(link = "logit"),
+                   data = model1.data,
+                   control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+vif(M1_simple)
+rm(M1_simple)
+```
+
+```{r}
+# Graph each subject's helping rate as a function of relationship quality.
+# This version summarizes helping for each subject-partner dyad at each CSI value.
+
+CSI_help_subject <- model1.data %>%
+  filter(focal_trial_type == "solo_early") %>%
+  group_by(subject, partner, CSI, condition) %>%
+  summarise(
+    helping_rate = mean(blocker_binary, na.rm = TRUE),
+    n_trials = n(),
+    .groups = "drop"
+  )
+
+ggplot(CSI_help_subject,
+       aes(x = CSI, y = helping_rate, color = subject)) +
+  geom_point(alpha = 0.8, size = 3) +
+
+  # Subject-specific trend lines
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 1
+  ) +
+
+  # Overall trend line across all subjects
+  geom_smooth(
+    aes(x = CSI, y = helping_rate),
+    inherit.aes = FALSE,
+    data = CSI_help_subject,
+    method = "lm",
+    se = TRUE,
+    color = "black",
+    linewidth = 1.3,
+    linetype = "dashed"
+  ) +
+
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  coord_cartesian(ylim = c(0, 1)) +
+  facet_wrap(~condition) +
+  labs(
+    x = "Dyadic CSI",
+    y = "Helping rate",
+    color = "Subject"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right"
+  )
+
+ggsave("Figure_S1 [FINAL].png", height = 5, width = 7, units = "in", dpi = 600)
+
+```
+
+# MODEL 2 - Latency to move blockers ------------------------------------------
+```{r Model 2 - Latency to move blocker by trial type and condition}
+library(splines)
+
+latency.data$focal_trial_type <- as.factor(latency.data$focal_trial_type)
+latency.data$focal_trial_type <- relevel(latency.data$focal_trial_type, ref = "solo_early")
+latency.data$condition        <- relevel(latency.data$condition, ref = "Unilateral")
+latency.data$subj_session     <- droplevels(latency.data$subj_session)
+
+# Null model
+NULL_LAT <- glmmTMB(blocker_latency ~ 1 + (1 | subject) + (1 | partner) + (1 | subj_session),
+                    family = gaussian, data = latency.data)
+# Latency model: focal_trial_type x condition
+# Prediction: both_early coefficient should be positive (longer latency = less motivated)
+LAT_M <- glmmTMB(blocker_latency ~ focal_trial_type * condition +
+                   ns(total_session_number_by_subject, df = 3) + trial_within_session_z +
+                   (1 | subject) + (1 | partner) + (1 | subj_session),
+                 family = gaussian, data = latency.data)
+
+anova(NULL_LAT, LAT_M)
+```
+
+```{r Model 2 Summary and Interactions}
+Anova(LAT_M, type = 3)
+
+# Estimates are now in seconds
+summary(pairs(emmeans(LAT_M, ~ focal_trial_type)), infer = TRUE)   # Early/End vs Early/Early
+summary(pairs(emmeans(LAT_M, ~ condition)), infer = TRUE)          # Unilateral vs Alternating
+summary(pairs(emmeans(LAT_M, ~ focal_trial_type * condition), by = "condition"), infer = TRUE)
+
+# Predicted latency across sessions (describes the spline)
+emmeans(LAT_M, ~ total_session_number_by_subject,
+        at = list(total_session_number_by_subject = c(1, 4, 8, 16)))
+
+summary(LAT_M)$coefficients$cond["trial_within_session_z", ]
+```
+
+
+```{r Check Model 2 Assumptions}
+# LATENCY MODEL FAILS dharma CHECKS!!!!---------------------------
+dharma_check(LAT_M, latency.data,
+             predictors = c("total_session_number_by_subject", "trial_within_session_z",
+                            "focal_trial_type", "condition"),
+             label = "Latency")
+```
+
+# MODEL 3 - Reciprocity: Partner's Prior Helping Predicts Current Helping -----
+
+```{r Test for reciprocity in the Alternating sessions, as predicted}
+# First see if previous helping in the Alternating sessions had any effect on helping in the current early/end trial
+Alternating_recip_subset <- early.data %>%
+  filter(!is.na(Alternating_recip_binary))
+
+Alternating_recip_summary <- Alternating_recip_subset %>%
+  group_by(Alternating_recip_binary) %>%
+  summarise(
+    n_trials = n(),
+    n_moved = sum(blocker_binary, na.rm = TRUE),
+    prop_moved = mean(blocker_binary, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+Alternating_recip_summary
+
+# Run a GLMM with binary distribution to see if there really was an effect
+Alternating_recip_subset$Alternating_recip_binary <- as.factor(Alternating_recip_subset$Alternating_recip_binary)
+
+# Trial number in the session and total session number added as covariate to account for experience
+Alternating_recip_model_glmer <- glmer(
+  blocker_binary ~ Alternating_recip_binary + log_total_z + trial_within_session_z +
+    (1 | subject) + (1 | partner) + (1 | subj_session),
+  data = Alternating_recip_subset,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", calc.derivs = TRUE)
+)
+
+NULL_M3 <- glmer(blocker_binary ~ 1 + (1 | subject) + (1 | partner) + (1 | subj_session),
+                 data = Alternating_recip_subset, family = binomial,
+                 control = glmerControl(optimizer = "bobyqa"))
+anova(NULL_M3, Alternating_recip_model_glmer)
+
+summary(Alternating_recip_model_glmer)
+# Odds Ratios
+exp(fixef(Alternating_recip_model_glmer))
+# Wald's Type III Chi Sq
+Anova(Alternating_recip_model_glmer, type = 3)
+# Table output
+tab_model(Alternating_recip_model_glmer,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = TRUE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "GLMM Predicting Helping from Partner's Prior Helping in Alternating Sessions")
+
+exp(cbind(OR = fixef(Alternating_recip_model_glmer),
+          confint(Alternating_recip_model_glmer, method = "Wald", parm = "beta_")))
+
+```
+
+```{r Check Model 3 Assumptions}
+# v5: This model already passed DHARMa, so it is unchanged. Its session covariate covers only
+# the 4 Alternating sessions, and a session random intercept did not improve fit (AIC 171.4 vs 170.3).
+dharma_check(Alternating_recip_model_glmer, Alternating_recip_subset,
+             predictors = c("log_total_z", "trial_within_session_z", "Alternating_recip_binary"),
+             label = "Alternating reciprocity")
+
+```
+
+```{r Model 3 Robustness - Quantile Test Calibration and Session as Factor}
+# Model 3 failed the DHARMa quantile test in some runs. Two follow-up checks:
+
+# (1) Calibration: how often does the quantile test flag a problem when the model is correct?
+# Simulate 100 data sets from the fitted Model 3, refit the model to each, and run the same test.
+set.seed(1)
+M3_sims <- simulate(Alternating_recip_model_glmer, nsim = 100)
+M3_cal_p <- sapply(1:100, function(k) {
+  d <- Alternating_recip_subset
+  d$blocker_binary <- M3_sims[[k]]
+  mk <- suppressMessages(suppressWarnings(update(Alternating_recip_model_glmer, data = d)))
+  sr <- simulateResiduals(mk, n = 250, simulateREs = "conditional", seed = k)
+  testQuantiles(sr, plot = FALSE)$p.value
+})
+mean(M3_cal_p < .05)   # proportion of correct-model data sets flagged at p < .05 (nominal = .05)
+
+# (2) Robustness: session within the Alternating condition as a factor instead of log(session)
+M3_sessfactor <- glmer(
+  blocker_binary ~ Alternating_recip_binary + factor(session_in_condition) + trial_within_session_z +
+    (1 | subject) + (1 | partner) + (1 | subj_session),
+  data = Alternating_recip_subset,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000))
+)
+Anova(M3_sessfactor, type = 3)
+exp(cbind(OR = fixef(M3_sessfactor), confint(M3_sessfactor, method = "Wald", parm = "beta_")))
+dharma_check(M3_sessfactor, Alternating_recip_subset,
+             predictors = c("trial_within_session_z", "Alternating_recip_binary"),
+             label = "Model 3 - session as factor")
+```
+
+```{r Post Hoc Model 3 - Examining the Direction of Attitudinal Reciprocity}
+AR_baseline_subset <- early.data %>%
+  filter(focal_trial_type == "solo_early") %>%  # critical: Early/End only
+  mutate(
+    AR_baseline_group = case_when(
+      condition == "Unilateral" ~ "Unilateral baseline",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "1" ~ "Alternating: previously helped",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "0" ~ "Alternating: not previously helped",
+      TRUE ~ NA_character_
+    ),
+    AR_baseline_group = factor(
+      AR_baseline_group,
+      levels = c(
+        "Unilateral baseline",
+        "Alternating: previously helped",
+        "Alternating: not previously helped"
+      )
+    )
+  ) %>%
+  filter(!is.na(AR_baseline_group))
+
+AR_baseline_subset %>%
+  group_by(AR_baseline_group) %>%
+  summarise(
+    n_trials = n(),
+    n_moved = sum(blocker_binary, na.rm = TRUE),
+    prop_moved = mean(blocker_binary, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# v5 CHANGES: log_total_z replaces total_session_number_z, and (1 | subj_session) added.
+# Partner intercept retained for consistency across models; its variance is estimated at zero
+# (singular fit), so the fixed-effect estimates are identical with or without it.
+AR_baseline_model_glmer <- glmer(blocker_binary ~ AR_baseline_group + log_total_z + trial_within_session_z + 
+                                   (1 | subject) + (1 | partner) + (1 | subj_session),
+  data = AR_baseline_subset,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa")
+)
+
+NULL_M4b <- glmer(blocker_binary ~ 1 + (1 | subject) + (1 | partner) + (1 | subj_session),
+                  data = AR_baseline_subset, family = binomial,
+                  control = glmerControl(optimizer = "bobyqa"))
+anova(NULL_M4b, AR_baseline_model_glmer)
+```
+
+
+```{r Model 3 Summary and Contrasts}
+summary(AR_baseline_model_glmer)
+Anova(AR_baseline_model_glmer, type = 3)
+exp(fixef(AR_baseline_model_glmer))
+
+AR_emm <- emmeans(AR_baseline_model_glmer, ~ AR_baseline_group)
+
+AR_custom_contrasts <- contrast(
+  AR_emm,
+  method = list(
+    helped_vs_unilateral = c(-1, 1, 0),
+    not_helped_vs_unilateral = c(-1, 0, 1),
+    helped_vs_not_helped = c(0, 1, -1)
+  ),
+  adjust = "Holm"
+)
+
+summary(
+  AR_custom_contrasts,
+  infer = TRUE,
+  type = "response"
+)
+```
+
+```{r Check AR Model 3 Assumptions}
+dharma_check(AR_baseline_model_glmer, AR_baseline_subset,
+             predictors = c("log_total_z", "trial_within_session_z", "AR_baseline_group"),
+             label = "Three-group baseline")
+```
+
+# MODEL 4 - CUMULATIVE PAST HELPING
+
+```{r Model 4 - Blocker Movement based on Partner's Previous Cumulative Helping}
+# Restrict to trials where focal subject has an early blocker and prior helping data is available
+recip.model.data <- early.data %>%
+  filter(focal_trial_type == "solo_early",
+         condition == "Unilateral",
+         !is.na(partner_prior_help_z))
+
+recip.model.data$condition <- relevel(recip.model.data$condition, ref = "Unilateral")
+
+# Null model
+NULL_M4 <- glmer(blocker_binary ~ 1 + (1 | subject) + (1 | partner) + (1 | subj_session),
+                 family = binomial(link = "logit"),
+                 data = recip.model.data)
+
+# Model 2: Partner's prior helping rate predicts focal subject's blocker removal
+# v5 CHANGES: log_total_z replaces total_session_number_z, and (1 | subj_session) added.
+M4 <- glmer(blocker_binary ~ partner_prior_help_z + log_total_z + trial_within_session_z +
+              (1 | subject) + (1 | partner) + (1 | subj_session),
+            family = binomial(link = "logit"),
+            data = recip.model.data,
+            control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+
+anova(NULL_M4, M4, test = "Chisq")
+```
+
+```{r Model 4 Summary and Interactions}
+summary(M4)
+
+Anova(M4, type = 3)
+
+tab_model(M4,
+          show.est = TRUE, show.ci = 0.95,
+          show.p = TRUE, p.style = "numeric",
+          show.se = TRUE, show.r2 = TRUE,
+          show.zeroinf = FALSE,
+          show.re.var = FALSE, show.icc = FALSE,
+          title = "GLMM Predicting Helping from Partner's Prior Helping Rate")
+
+# Probe the Partner Prior Help x Condition interaction (if significant)
+# Interaction not signficant
+# FIX (v5): M4 is fit to Unilateral trials only and has no condition term,
+# so emtrends(~ condition) and pairs() errored. Now reports the single slope.
+reciprocity_slopes <- emtrends(M4, ~ 1, var = "partner_prior_help_z")
+reciprocity_slopes
+reciprocity_OR <- summary(reciprocity_slopes, infer = TRUE)
+reciprocity_OR$OR <- exp(reciprocity_OR$partner_prior_help_z.trend)
+reciprocity_OR
+
+# Interpretation of Coefficients:
+# As predicted by our last model, condition had a significant effect, with them less likely to move it in the Alternating condition
+# They also had a significant decrease in helping with trial number
+```
+
+```{r Check Model 4 Assumptions}
+summary(M4)$varcor
+
+# v5: full DHARMa battery
+dharma_check(M4, recip.model.data,
+             predictors = c("partner_prior_help_z", "log_total_z", "trial_within_session_z"),
+             label = "Model 3")
+
+# Collinearity
+# FIX (v5): removed condition (only one level in this Unilateral-only subset), which errored.
+M4_simple <- glmer(blocker_binary ~ partner_prior_help_z + log_total_z + trial_within_session_z +
+                     (1 | subject) + (1 | partner) + (1 | subj_session),
+                   family = binomial(link = "logit"),
+                   data = recip.model.data,
+                   control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 200000)))
+vif(M4_simple)
+rm(M4_simple)
+```
+
+
+# MODEL 5 SI - SOLICITATION -------------------------
+
+```{r Model 5 Build - Solicitation Behaviors}
+# Apparatus contacts (count outcome - Poisson or Negative Binomial)
+# Using subject-level long format; apparatus = number of apparatus contacts
+
+
+# Check for overdispersion in apparatus contacts
+mean(long.data$partner_apparatus, na.rm = TRUE)
+var(long.data$partner_apparatus, na.rm = TRUE)
+
+# Null models
+NULL_M5a <- glmer(partner_apparatus ~ 1 + (1 | subject) + (1 | partner),
+                  family = poisson(link = "log"),
+                  data = long.data)
+
+NULL_M5b <- glmmTMB(partner_apparatus ~ 1 + (1 | subject) + (1 | partner),
+                    family = nbinom2(link = "log"),
+                    data = long.data)
+
+# Compare Poisson vs. Negative Binomial for apparatus contacts
+AIC(NULL_M5a, NULL_M5b)
+
+# Model 3b: Apparatus contacts by trial type and condition
+M5a <- glmmTMB(partner_apparatus ~ trial_from_partner_perspective * condition +
+                 (1 | subject) + (1 | partner),
+               family = nbinom2(link = "log"),
+               data = long.data)
+
+summary(M5a)
+Anova(M5a, type = 3)
+
+# Look within trial type
+MM_M4_Solicit <- emmeans(M5a, ~ trial_from_partner_perspective, type = "response")
+# Critical comparison: leaving out the interaction with condition
+pairs(MM_M4_Solicit, adjust = "holm", type = "response")
+confint(pairs(MM_M4_Solicit, adjust = "holm", type = "response"))
+
+# The partner solicited significantly more when it needed help than when it did not.
+# They also solicited significantly more when they needed help than when they both had to move the blockers for end end trials
+
+```
+
+# VISUALIZATIONS ---------------------------------------------------------------
+
+```{r}
+subject_shapes <- c(
+  Griffin = 16,  # filled circle
+  Lily    = 17,  # filled triangle
+  Lychee  = 15,  # filled square
+  Nala    = 18,  # filled diamond
+  Nkima   = 8,   # asterisk
+  Widget  = 14,   # x
+  Wren    = 4    # Sq Triangle
+)
+```
+
+
+```{r Figure 3 - Blocker Removal Rate by Trial Type and Condition}
+blocker_summary_raw <- model1.data %>%
+  group_by(subject, partner, focal_trial_type, condition) %>%
+  summarise(
+    n_removed = sum(blocker_binary, na.rm = TRUE),
+    n_total   = n(),
+    prop_removed = n_removed / n_total,
+    .groups = "drop"
+  )
+
+# Subject level data to create the geom_points so we dont have a ton of repeats
+subject_level_geom_points <- model1.data %>%
+  group_by(subject, focal_trial_type, condition) %>%
+  summarise(
+    n_removed = sum(blocker_binary, na.rm = TRUE),
+    n_total   = n(),
+    prop_removed = n_removed / n_total,
+    .groups = "drop"
+  )
+
+
+
+# Create Labels
+blocker_summary_raw$condition <- factor(blocker_summary_raw$condition,
+                                        levels = c("Unilateral", "Alternating"))
+
+blocker_summary_raw$pair <- interaction(blocker_summary_raw$subject,
+                                        blocker_summary_raw$partner,
+                                        sep = " / ", drop = TRUE)
+
+blocker_summary_raw$focal_trial_type <- factor(blocker_summary_raw$focal_trial_type,
+                                               levels = c("end_end", "solo_early", "both_early"))
+
+subject_level_geom_points$condition <- factor(subject_level_geom_points$condition,
+                                        levels = c("Unilateral", "Alternating"))
+
+subject_level_geom_points$focal_trial_type <- factor(subject_level_geom_points$focal_trial_type,
+                                               levels = c("end_end", "solo_early", "both_early"))
+```
+
+
+```{r Figure 3 - Helping by Condition x Trial Type}
+ggplot(data = blocker_summary_raw, aes(x = condition,
+                                y = prop_removed,
+                                fill = focal_trial_type)) +
+  geom_boxplot(position = position_dodge(width = 0.8),
+               color = "black",
+               alpha = 0.9,
+               outlier.shape = NA) +
+  geom_jitter(data = subject_level_geom_points, aes(group = focal_trial_type, shape = subject),
+              position = position_jitterdodge(jitter.width = 0.0,
+                                              dodge.width = 0.8,
+                                              seed = 123),
+              size = 3.5,
+              alpha = 1.0,
+              #color = "black",
+              show.legend = FALSE) +
+  scale_x_discrete(labels = c(
+    "Unilateral" = "Unilateral",
+    "Alternating" = "Alternating"
+  )) +
+  scale_fill_manual(
+    values = c(
+      "end_end"    = "#808080",  # grey
+      "solo_early" = "#56B4E9",  # light blue, colorblind-friendly
+      "both_early" = "#003B73"   # darker blue, colorblind-friendly
+    ),
+    labels = c(
+      "end_end"    = "End / End\n(Neither got food early)",
+      "solo_early" = "Early / End\n(Only subject got food early)",
+      "both_early" = "Early / Early\n(Both got food early)"
+    ),
+    name = "Trial Type",
+    guide = guide_legend(nrow = 1)
+  ) +
+  scale_shape_manual(values = subject_shapes, name = "Subject") +
+  labs(x = "Condition",
+       y = "Proportion of Trials in which Blocker was Removed") +
+  scale_y_continuous(limits = c(0, 1.30),
+                     breaks = seq(0, 1, by = 0.25)) +
+  # Unilateral End/End vs Early/End
+  geom_segment(aes(x = 0.73, xend = 1.00, y = 1.16, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 0.73, xend = 0.73, y = 1.14, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.00, xend = 1.00, y = 1.14, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 0.865, y = 1.18, label = "***"),
+          inherit.aes = FALSE, size = 6) +
+  # Unilatearal Early/End vs Early/Early
+  geom_segment(aes(x = 1.00, xend = 1.27, y = 1.08, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.00, xend = 1.00, y = 1.06, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.27, xend = 1.27, y = 1.06, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 1.135, y = 1.10, label = "**"),
+          inherit.aes = FALSE, size = 6) +
+
+  geom_segment(aes(x = 0.73, xend = 1.27, y = 1.24, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 0.73, xend = 0.73, y = 1.22, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.27, xend = 1.27, y = 1.22, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 1.00, y = 1.26, label = "***"),
+          inherit.aes = FALSE, size = 6) +
+
+  geom_segment(aes(x = 1.73, xend = 2.00, y = 1.16, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.73, xend = 1.73, y = 1.14, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 2.00, xend = 2.00, y = 1.14, yend = 1.16),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 1.865, y = 1.18, label = "***"),
+          inherit.aes = FALSE, size = 6) +
+
+  geom_segment(aes(x = 2.00, xend = 2.27, y = 1.08, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 2.00, xend = 2.00, y = 1.06, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 2.27, xend = 2.27, y = 1.06, yend = 1.08),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 2.135, y = 1.10, label = "**"),
+          inherit.aes = FALSE, size = 6) +
+
+  geom_segment(aes(x = 1.73, xend = 2.27, y = 1.24, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 1.73, xend = 1.73, y = 1.22, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_segment(aes(x = 2.27, xend = 2.27, y = 1.22, yend = 1.24),
+             inherit.aes = FALSE) +
+  geom_text(aes(x = 2.00, y = 1.26, label = "***"),
+          inherit.aes = FALSE, size = 6) +
+  theme_bw() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.title = element_text(face = "bold", family = "Times"),
+    legend.title = element_text(face = "bold", family = "Times", size = 13),
+    legend.text = element_text(size = 12),
+    legend.background = element_rect(fill = "transparent"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.key = element_rect(fill = "transparent"),
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16)
+  )
+
+ggsave("Figure_3 [FINAL].png", height = 7, width = 8, units = "in")
+```
+
+```{r Figure 4 - Effect of Previous Helping}
+AR_baseline_raw <- early.data %>%
+  filter(focal_trial_type == "solo_early") %>%  # critical: Early/End only
+  mutate(
+    AR_baseline_group = case_when(
+      condition == "Unilateral" ~ "Unilateral baseline",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "1" ~ "Alternating: previously helped",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "0" ~ "Alternating: not previously helped",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(AR_baseline_group)) %>%
+  group_by(subject, partner, AR_baseline_group) %>%
+  summarise(
+    n_removed = sum(blocker_binary, na.rm = TRUE),
+    n_total   = n(),
+    prop_removed = n_removed / n_total,
+    .groups = "drop"
+  )
+
+AR_baseline_raw$AR_baseline_group <- factor(
+  AR_baseline_raw$AR_baseline_group,
+  levels = c(
+    "Unilateral baseline",
+    "Alternating: previously helped",
+    "Alternating: not previously helped"
+  )
+)
+
+AR_baseline_raw
+```
+
+```{r Figure 4 - Create the Subject Level Data Points for geom_point( )}
+AR_subject_level_geom_point <- early.data %>%
+  filter(focal_trial_type == "solo_early") %>%  # critical: Early/End only
+  mutate(
+    AR_baseline_group = case_when(
+      condition == "Unilateral" ~ "Unilateral baseline",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "1" ~ "Alternating: previously helped",
+      condition == "Alternating" & as.character(Alternating_recip_binary) == "0" ~ "Alternating: not previously helped",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(AR_baseline_group)) %>%
+  group_by(subject, AR_baseline_group) %>%
+  summarise(
+    n_removed = sum(blocker_binary, na.rm = TRUE),
+    n_total   = n(),
+    prop_removed = n_removed / n_total,
+    .groups = "drop"
+  )
+
+AR_subject_level_geom_point$AR_baseline_group <- factor(
+  AR_subject_level_geom_point$AR_baseline_group,
+  levels = c(
+    "Unilateral baseline",
+    "Alternating: previously helped",
+    "Alternating: not previously helped"
+  )
+)
+
+AR_subject_level_geom_point
+```
+
+
+```{r}
+# From Figure 3 source data
+blocker_summary_raw %>%
+  filter(condition == "Unilateral",
+         focal_trial_type == "solo_early") %>%
+  summarise(
+    n_rows = n(),
+    mean_prop = mean(prop_removed),
+    median_prop = median(prop_removed)
+  )
+
+# From new AR baseline graph source data
+AR_baseline_raw %>%
+  filter(AR_baseline_group == "Unilateral baseline") %>%
+  summarise(
+    n_rows = n(),
+    mean_prop = mean(prop_removed),
+    median_prop = median(prop_removed)
+  )
+
+AR_subject_level_geom_point %>%
+  filter(AR_baseline_group == "Unilateral baseline") %>%
+  summarise(
+    n_rows = n(),
+    mean_prop = mean(prop_removed),
+    median_prop = median(prop_removed)
+  )
+
+```
+
+```{r Figure 4 - Effect of Previous Trial Helping}
+ggplot(data = AR_baseline_raw,
+       aes(x = AR_baseline_group,
+           y = prop_removed,
+           fill = AR_baseline_group)) +
+  geom_boxplot(
+    color = "black",
+    alpha = 0.9,
+    outlier.shape = NA,
+    width = 0.6
+  ) +
+  geom_jitter(data = AR_subject_level_geom_point, aes(group = AR_baseline_group, shape = subject),
+              position = position_jitterdodge(jitter.width = 0.00,
+                                              dodge.width = 0.8,
+                                              seed = 123),
+              size = 3.5,
+              alpha = 1.0,
+              #color = "black",
+              show.legend = FALSE) +
+  scale_fill_manual(
+    values = c(
+      "Unilateral baseline" = "#808080",
+      "Alternating: previously helped" = "#56B4E9",
+      "Alternating: not previously helped" = "#003B73"
+    ),
+    labels = c(
+      "Unilateral baseline" = "Unilateral\nbaseline",
+      "Alternating: previously helped" = "Alternating:\nPreviously Helped",
+      "Alternating: not previously helped" = "Alternating:\nNot Previously Helped"
+    ),
+    name = NULL,
+    guide = guide_legend(nrow = 1)
+  ) +
+  scale_shape_manual(values = subject_shapes, name = "Subject") +
+  scale_x_discrete(
+    labels = c(
+      "Unilateral baseline" = "Unilateral\nbaseline",
+      "Alternating: previously helped" = "Previously\nhelped",
+      "Alternating: not previously helped" = "Previously\nnot helped"
+    )
+  ) +
+  labs(
+    x = "Partner's Behavior in Preceding \nEarly/End Trial",
+    y = "Proportion of Trials in which Blocker was Removed"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.30),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+
+  # ------------------------------------------------------------
+  # Significance brackets based on contrasts:
+  # helped_vs_unilateral: OR = 0.87, p = .748 -> ns
+  # not_helped_vs_unilateral: OR = 0.26, p = .002 -> **
+  # helped_vs_not_helped: OR = 3.32, p = .022 -> *
+  # ------------------------------------------------------------
+
+  # Unilateral baseline vs previously helped: ns
+  geom_segment(aes(x = 1, xend = 2, y = 1.08, yend = 1.08),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 1, xend = 1, y = 1.06, yend = 1.08),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 2, xend = 2, y = 1.06, yend = 1.08),
+               inherit.aes = FALSE) +
+  geom_text(aes(x = 1.5, y = 1.14, label = "N.S."),
+            inherit.aes = FALSE, size = 3) +
+
+  # Previously helped vs previously not helped: *
+  geom_segment(aes(x = 2, xend = 3, y = 1.16, yend = 1.16),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 2, xend = 2, y = 1.14, yend = 1.16),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 3, xend = 3, y = 1.14, yend = 1.16),
+               inherit.aes = FALSE) +
+  geom_text(aes(x = 2.5, y = 1.19, label = "*"),
+            inherit.aes = FALSE, size = 5) +
+
+  # Unilateral baseline vs previously not helped: ***
+  geom_segment(aes(x = 1, xend = 3, y = 1.24, yend = 1.24),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 1, xend = 1, y = 1.22, yend = 1.24),
+               inherit.aes = FALSE) +
+  geom_segment(aes(x = 3, xend = 3, y = 1.22, yend = 1.24),
+               inherit.aes = FALSE) +
+  geom_text(aes(x = 2, y = 1.27, label = "**"),
+            inherit.aes = FALSE, size = 5) +
+
+  theme_bw() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.title = element_text(face = "bold", family = "Times", size = 11),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 9),
+    axis.title.x = element_text(size = 11),
+    axis.title.y = element_text(size = 11),
+    legend.position = "none")
+
+ggsave("Figure_4 [FINAL].png", height = 4.5, width = 3.5, units = "in", dpi = 600)
+```
+
+```{r Figure 5 [Not Used] - Individual-Level Helping Rates Across Sessions}
+library(dplyr)
+
+by_session_individual <- long.data %>%
+  group_by(subject, dyad, condition, session_in_condition) %>%
+  summarise(
+    help_rate = mean(blocker_binary, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+by_session_learning <- model1.data %>%
+  group_by(focal_trial_type, condition, session_in_condition) %>%
+  summarise(
+    help_rate = mean(blocker_binary, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+ggplot(by_session_learning, aes(x = session_in_condition, y = help_rate,
+                                  group = focal_trial_type, color = focal_trial_type)) +
+  geom_point(size = 3, alpha = 0.7, position = position_dodge(width = 0.3)) +
+  geom_line(size = 1, position = position_dodge(width = 0.3)) +
+  geom_hline(yintercept = 0.5, size = 0.8, linetype = "longdash", color = "grey20") +
+  facet_wrap(~ condition) +
+  labs(x = "Session Number", y = "Proportion of Trials Blocker Removed") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 16),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    strip.text = element_text(size = 14, face = "bold")
+  )
+
+ggsave("Figure_S2 [FINAL].png", height = 5, width = 10, units = "in")
+```
+
+```{r}
+apparatus_summary_raw <- model1.data %>%
+  group_by(
+    subject,
+    partner,
+    focal_trial_type,
+    partner_apparatus
+  ) %>%
+  summarise(
+    n_removed = sum(blocker_binary, na.rm = TRUE),
+    n_total = sum(!is.na(blocker_binary)),
+    prop_removed = n_removed / n_total,
+    .groups = "drop"
+  )
+
+apparatus_summary_raw$focal_trial_type <- factor(
+  apparatus_summary_raw$focal_trial_type,
+  levels = c("end_end", "solo_early", "both_early"),
+  labels = c(
+    "End / End",
+    "Early / End",
+    "Early / Early"
+  )
+)
+
+ggplot(
+  apparatus_summary_raw,
+  aes(
+    x = partner_apparatus,
+    y = prop_removed
+  )
+) +
+  geom_point(
+    aes(size = n_total),
+    alpha = 0.55,
+    color = "black",
+    position = position_jitter(
+      width = 0.15,
+      height = 0.015
+    )
+  ) +
+  geom_smooth(
+    method = "glm",
+    method.args = list(
+      family = binomial(link = "logit")
+    ),
+    aes(weight = n_total),
+    se = TRUE,
+    color = "black",
+    linewidth = 1
+  ) +
+  facet_wrap(
+    ~ focal_trial_type,
+    nrow = 1
+  ) +
+  scale_size_continuous(
+    name = "Number of Trials",
+    range = c(1.5, 5)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  labs(
+    x = "Partner Apparatus Interactions",
+    y = "Proportion of Trials in which Blocker was Removed"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(
+      face = "bold",
+      family = "Times",
+      size = 13
+    ),
+    axis.title = element_text(
+      face = "bold",
+      family = "Times"
+    ),
+    legend.title = element_text(
+      face = "bold",
+      family = "Times",
+      size = 13
+    ),
+    legend.text = element_text(size = 12),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16)
+  )
+```
+
